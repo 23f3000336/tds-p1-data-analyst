@@ -8,6 +8,16 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+# Load a local .env into the environment (no-op in prod where vars are already
+# set, e.g. via the host dashboard or systemd EnvironmentFile). Loading here in
+# config.py means every entry point (app.py, run_local.py) benefits automatically.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except Exception:
+    pass
+
 
 def _get(name: str, default: str | None = None, required: bool = False) -> str:
     val = os.environ.get(name, default)
@@ -46,7 +56,11 @@ class Config:
 
     @staticmethod
     def load() -> "Config":
-        base = _get("PUBLIC_BASE_URL", "").rstrip("/")
+        base = _get("PUBLIC_BASE_URL", "").strip().rstrip("/")
+        # Be forgiving: a bare host (no scheme) would make log_url un-wget-able,
+        # so default it to https:// which is what a domain/reverse-proxy uses.
+        if base and not base.startswith(("http://", "https://")):
+            base = "https://" + base
         port = int(_get("PORT", "8080"))
         if not base:
             # Fall back to localhost so the process still boots; log_url will be

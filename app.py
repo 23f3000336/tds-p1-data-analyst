@@ -22,8 +22,8 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 
 from agent import Agent
-from answer import (apply_log_url, extract_json_object, to_reply_string,
-                    wants_final_json)
+from answer import (apply_log_url, extract_json_object, looks_like_giveup,
+                    to_reply_string, wants_final_json)
 from config import Config
 from runlog import RunLogger, new_run_id
 from telegram_api import TelegramClient
@@ -137,20 +137,42 @@ async def handle_message(chat_id: int, text: str) -> None:
         logger.log("send_failed", error=f"{type(e).__name__}: {e}")
 
 
+async def _force(history_copy, hint, logger):
+    """One tool-free pass that must emit only the JSON. Returns parsed obj/None."""
+    try:
+        forced = await asyncio.to_thread(
+            agent.force_json, history_copy, hint, logger=logger)
+        obj = extract_json_object(forced)
+        logger.log("force_json_result", got_json=obj is not None)
+        return obj
+    except Exception as e:
+        logger.log("force_json_error", error=f"{type(e).__name__}: {e}")
+        return None
+
+
 async def _shape_json_reply(final_text, history_copy, log_url, incoming_text,
                             logger) -> str:
     obj = extract_json_object(final_text)
     if obj is None:
         # The model didn't emit clean JSON — force one more, tool-free pass.
-        try:
-            forced = await asyncio.to_thread(
-                agent.force_json, history_copy,
-                "Match the exact shape shown in the user's message.", logger=logger,
-            )
-            obj = extract_json_object(forced)
-            logger.log("force_json_result", got_json=obj is not None)
-        except Exception as e:
-            logger.log("force_json_error", error=f"{type(e).__name__}: {e}")
+        obj = await _force(
+            history_copy, "Match the exact shape shown in the user's message.", logger)
+
+    # If the model hedged (unknown / unable / N/A / None / empty), demand a
+    # committed answer — a blank answer always scores zero, a best-effort one
+    # can be right.
+    if obj is not None and looks_like_giveup(obj):
+        logger.log("giveup_detected", answer=obj)
+        obj2 = await _force(
+            history_copy,
+            "Do NOT answer with unknown / unable / N/A / none / null or an empty "
+            "value. Commit to your single best, specific answer using authoritative "
+            "public knowledge (note the source/period in your reasoning), in the "
+            "EXACT JSON shape the user asked for.",
+            logger,
+        )
+        if obj2 is not None and not looks_like_giveup(obj2):
+            obj = obj2
 
     if obj is not None:
         force_url = "log_url" in incoming_text.lower()

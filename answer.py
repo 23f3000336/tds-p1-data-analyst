@@ -118,3 +118,39 @@ def apply_log_url(obj: Any, log_url: str, *, force: bool) -> Any:
 def to_reply_string(obj: Any) -> str:
     """Compact, single-object JSON — exactly what the grader will json.loads()."""
     return json.dumps(obj, ensure_ascii=False)
+
+
+_GIVEUP_SUBSTR = (
+    "unable", "unknown", "cannot determine", "can't determine", "could not",
+    "couldn't", "not determine", "not available", "not found", "no data",
+    "insufficient", "n/a",
+)
+_GIVEUP_EXACT = {"", "na", "none", "null", "tbd", "?", "-", "--", "unavailable",
+                 "unspecified", "undetermined"}
+
+
+def looks_like_giveup(obj: Any) -> bool:
+    """True if the answer is a hedge/placeholder (unknown/unable/N/A/None/empty)
+    rather than a committed value. Used to trigger a "commit to an answer" retry.
+    The `log_url` field is ignored (it's a URL, not an answer)."""
+    found = False
+
+    def walk(value: Any, key: str | None = None) -> None:
+        nonlocal found
+        if found or key == "log_url":
+            return
+        if value is None:
+            found = True
+        elif isinstance(value, str):
+            s = value.strip().lower()
+            if s in _GIVEUP_EXACT or any(sub in s for sub in _GIVEUP_SUBSTR):
+                found = True
+        elif isinstance(value, dict):
+            for k, v in value.items():
+                walk(v, k)
+        elif isinstance(value, (list, tuple)):
+            for v in value:
+                walk(v)
+
+    walk(obj)
+    return found
